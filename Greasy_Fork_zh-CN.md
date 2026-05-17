@@ -6,10 +6,16 @@
 
 ## 效果预览
 
-<p>
-  <img src="https://raw.githubusercontent.com/dason-zou/Reddit-CN-Translator/main/assets/translate.png" width="330" style="vertical-align: top;" alt="Reddit 评论旁的翻译按钮">
-  <img src="https://raw.githubusercontent.com/dason-zou/Reddit-CN-Translator/main/assets/options.png" width="200" style="vertical-align: top;" alt="Reddit 中文翻译设置面板">
-</p>
+<table>
+  <tr>
+    <td valign="top">
+      <img src="https://raw.githubusercontent.com/dason-zou/Reddit-CN-Translator/main/assets/translate.png" width="300" alt="Reddit 评论旁的翻译按钮">
+    </td>
+    <td valign="top">
+      <img src="https://raw.githubusercontent.com/dason-zou/Reddit-CN-Translator/main/assets/options.png" width="200" alt="Reddit 中文翻译设置面板">
+    </td>
+  </tr>
+</table>
 
 ## 功能
 
