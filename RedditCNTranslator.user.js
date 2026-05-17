@@ -68,6 +68,9 @@
     const TRANSLATE_API_FALLBACK_ORDER = ['google', 'tencentAi', 'deepl', 'googleMobile'];
     const BING_TRANSLATOR_PAGE_URL = 'https://cn.bing.com/translator';
     const BING_TRANSLATOR_IID = 'translator.5025';
+    const AUTO_TRANSLATE_INITIAL_WAIT_MS = 1000;
+    const AUTO_TRANSLATE_STABLE_WAIT_MS = 1200;
+    const AUTO_TRANSLATE_MAX_WAIT_MS = 10000;
   
     const CONTENT_SELECTORS = [
       'shreddit-post [slot="title"]',
@@ -1312,6 +1315,45 @@
       }
     }
 
+    function getInitialLoadSignature() {
+      return [
+        document.querySelectorAll('shreddit-comment, div[shreddit-comment-content], shreddit-comment .md[slot="comment"]').length,
+        document.querySelectorAll(CONTENT_SELECTORS).length,
+        document.querySelectorAll('[aria-busy="true"], shreddit-loading, faceplate-progress').length
+      ].join(':');
+    }
+
+    function waitForInitialLoadStable(session, pathname) {
+      const startedAt = Date.now();
+      let lastSignature = getInitialLoadSignature();
+      let lastChangedAt = startedAt;
+
+      return new Promise((resolve) => {
+        const timer = setInterval(() => {
+          if (session?.stopped || pathname !== location.pathname || !isPostPage()) {
+            clearInterval(timer);
+            resolve(false);
+            return;
+          }
+
+          const now = Date.now();
+          const signature = getInitialLoadSignature();
+          if (signature !== lastSignature) {
+            lastSignature = signature;
+            lastChangedAt = now;
+          }
+
+          const waitedLongEnough = now - startedAt >= AUTO_TRANSLATE_INITIAL_WAIT_MS;
+          const isStable = now - lastChangedAt >= AUTO_TRANSLATE_STABLE_WAIT_MS;
+          const reachedMaxWait = now - startedAt >= AUTO_TRANSLATE_MAX_WAIT_MS;
+          if (waitedLongEnough && (isStable || reachedMaxWait)) {
+            clearInterval(timer);
+            resolve(true);
+          }
+        }, 250);
+      });
+    }
+
     function scheduleAutoTranslateAll() {
       if (!autoTranslateAllEnabled || !isPostPage() || translateAllSession) return;
       if (autoTranslateAllPath === location.pathname) return;
@@ -1322,11 +1364,12 @@
         if (!autoTranslateAllEnabled || !isPostPage() || translateAllSession) return;
         if (autoTranslateAllPath === location.pathname) return;
 
+        const pathname = location.pathname;
         const session = {
           stopped: false,
           abortCurrent: null
         };
-        autoTranslateAllPath = location.pathname;
+        autoTranslateAllPath = pathname;
         translateAllSession = session;
 
         if (translateAllButton) {
@@ -1334,6 +1377,8 @@
         }
 
         try {
+          const isReady = await waitForInitialLoadStable(session, pathname);
+          if (!isReady) return;
           await translateAll(session);
         } finally {
           if (translateAllSession === session) {
