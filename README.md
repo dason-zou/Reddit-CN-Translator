@@ -8,11 +8,11 @@
 
 按需翻译评论：
 
-<img src="assets/translate.png" alt="Reddit 评论旁的翻译按钮" width="460">
+<img src="assets/translate.png" alt="Reddit 评论旁的翻译按钮" width="300">
 
-设置目标语言、默认全帖翻译和翻译 API：
+点击齿轮展开右下角 设置目标语言、默认全帖翻译和翻译 API 的菜单：
 
-<img src="assets/options.png" alt="Reddit 中文翻译设置面板" width="320">
+<img src="assets/options.png" alt="Reddit 中文翻译设置面板" width="200">
 
 ## 功能特性
 
