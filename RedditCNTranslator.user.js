@@ -2,7 +2,7 @@
 // @name         Reddit 中文翻译
 // @name:en      Reddit Chinese Translator
 // @namespace    https://github.com/dason-zou/Reddit-CN-Translator
-// @version      1.0.0
+// @version      1.0.1
 // @description  仿照 YouTube 评论区翻译功能设计，专门适配新版 Reddit（www.reddit.com），在帖子标题、正文与评论旁添加「翻译成中文」按钮；可按需翻译并再次点击还原，也支持全帖翻译。已含中文的内容不显示按钮，代码块不翻译。支持多个非官方翻译接口。不支持 old.reddit。
 // @description:en  YouTube-style translation for new Reddit (www.reddit.com), adding translate buttons beside post titles, bodies, and comments. Translate only what you want, click again to restore the original, or translate the full post. Skips Chinese text and code blocks. Supports multiple unofficial translation APIs. Does not support old.reddit.
 // @match        https://www.reddit.com/*
