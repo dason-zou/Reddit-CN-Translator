@@ -2,7 +2,7 @@
 // @name         Reddit 中文翻译
 // @name:en      Reddit Chinese Translator
 // @namespace    https://github.com/dason-zou/Reddit-CN-Translator
-// @version      1.0.1
+// @version      1.0.2
 // @description  仿照 YouTube 评论区翻译功能设计，专门适配新版 Reddit（www.reddit.com），在帖子标题、正文与评论旁添加「翻译成中文」按钮；可按需翻译并再次点击还原，也支持全帖翻译。已含中文的内容不显示按钮，代码块不翻译。支持多个非官方翻译接口。不支持 old.reddit。
 // @description:en  YouTube-style translation for new Reddit (www.reddit.com), adding translate buttons beside post titles, bodies, and comments. Translate only what you want, click again to restore the original, or translate the full post. Skips Chinese text and code blocks. Supports multiple unofficial translation APIs. Does not support old.reddit.
 // @match        https://www.reddit.com/*
@@ -36,6 +36,10 @@
     const AUTO_TRANSLATE_ALL_STORAGE_KEY = 'reddit-zh-translator-auto-all';
     const DEBUG_STORAGE_KEY = 'reddit-zh-translator-debug';
     const TRANSLATE_CACHE_PREFIX = 'reddit-zh-translator-cache';
+    const TRANSLATE_ALL_CONCURRENCY = 3;
+    const TENCENT_BATCH_CONCURRENCY = 1;
+    const TENCENT_BATCH_MAX_ITEMS = 3;
+    const TENCENT_BATCH_MAX_CHARS = 1200;
     const TRANSLATE_API_AUTO = 'auto';
     const TARGET_LANGS = {
       zhCN: {
@@ -361,17 +365,13 @@
         if (!isPostPage()) return;
 
         if (translateAllSession) {
-          translateAllSession.stopped = true;
-          translateAllSession.abortCurrent?.();
+          abortTranslateSession(translateAllSession);
           btn.disabled = true;
           btn.textContent = BTN_TEXT_TRANSLATE_ALL_STOPPING;
           return;
         }
 
-        const session = {
-          stopped: false,
-          abortCurrent: null
-        };
+        const session = createTranslateSession();
         translateAllSession = session;
         btn.textContent = BTN_TEXT_TRANSLATE_ALL_STOP;
 
@@ -602,8 +602,7 @@
       }
 
       if (!shouldShowTranslateAll && translateAllSession) {
-        translateAllSession.stopped = true;
-        translateAllSession.abortCurrent?.();
+        abortTranslateSession(translateAllSession);
       }
     }
 
@@ -738,6 +737,26 @@
       return String(text || '').slice(0, 300);
     }
 
+    function createTranslateSession() {
+      return {
+        stopped: false,
+        abortCurrent: null,
+        abortSet: new Set()
+      };
+    }
+
+    function abortTranslateSession(session) {
+      if (!session) return;
+
+      session.stopped = true;
+      if (session.abortSet?.size) {
+        Array.from(session.abortSet).forEach(abort => abort());
+        return;
+      }
+
+      session.abortCurrent?.();
+    }
+
     function requestText(options, session) {
       if (session?.stopped) return Promise.resolve(null);
 
@@ -748,6 +767,7 @@
         const finish = (value) => {
           if (settled) return;
           settled = true;
+          session?.abortSet?.delete(abort);
           if (session?.abortCurrent === abort) {
             session.abortCurrent = null;
           }
@@ -809,6 +829,7 @@
         }
 
         if (session) {
+          session.abortSet?.add(abort);
           session.abortCurrent = abort;
           if (session.stopped) abort();
         }
@@ -880,9 +901,13 @@
       return data?.[0]?.translations?.[0]?.text || null;
     }
 
-    function parseTencentAiResponse(responseText) {
+    function parseTencentAiBatchResponse(responseText) {
       const data = JSON.parse(responseText);
-      return data?.auto_translation?.[0] || null;
+      return Array.isArray(data?.auto_translation) ? data.auto_translation : null;
+    }
+
+    function parseTencentAiResponse(responseText) {
+      return parseTencentAiBatchResponse(responseText)?.[0] || null;
     }
 
     function parseDeepLResponse(responseText) {
@@ -990,7 +1015,7 @@
       return translated;
     }
 
-    async function translateWithTencentAi(text, session) {
+    async function translateBatchWithTencentAi(textList, session) {
       const payload = {
         header: {
           fn: 'auto_translation',
@@ -1003,7 +1028,7 @@
         text_domain: '',
         source: {
           lang: 'auto',
-          text_list: [text]
+          text_list: textList
         },
         target: {
           lang: getTargetLanguageConfig().tencentAi
@@ -1022,10 +1047,16 @@
         nocache: true,
         debugName: 'tencentAi'
       }, session);
-      const translated = responseText ? parseTencentAiResponse(responseText) : null;
-      if (responseText && !translated) {
+      const translations = responseText ? parseTencentAiBatchResponse(responseText) : null;
+      if (responseText && (!translations || translations.length !== textList.length)) {
         logTranslateDebug('tencentAi parse returned empty', previewResponse(responseText));
       }
+      return translations && translations.length === textList.length ? translations : null;
+    }
+
+    async function translateWithTencentAi(text, session) {
+      const translations = await translateBatchWithTencentAi([text], session);
+      const translated = translations?.[0] || null;
       return translated;
     }
 
@@ -1299,20 +1330,266 @@
       );
     }
 
+    function createTencentBatchJob(target, btn) {
+      const state = stateMap.get(target);
+
+      if (state?.translationEl || state?.translatedText) {
+        showTranslation(target, state);
+        state.showingTranslation = true;
+        btn.textContent = BTN_TEXT_ORIGINAL;
+        return null;
+      }
+
+      if (pendingSet.has(target)) return null;
+
+      const originalText = getText(target);
+      if (!originalText) return null;
+
+      const job = {
+        target,
+        btn,
+        originalText,
+        isTitle: isPostTitle(target),
+        parts: [],
+        box: null
+      };
+
+      if (job.isTitle) {
+        job.parts.push({
+          sourceNode: null,
+          chunks: splitText(originalText),
+          translatedChunks: []
+        });
+      } else {
+        const { box, layoutEl } = createTranslatedContainer(target);
+        job.box = box;
+
+        for (const child of layoutEl.childNodes) {
+          if (isCodeBlock(child)) {
+            job.parts.push({ clone: child.cloneNode(true) });
+            continue;
+          }
+
+          const text = getText(child);
+          if (!text) {
+            job.parts.push({ clone: child.cloneNode(true) });
+            continue;
+          }
+
+          job.parts.push({
+            sourceNode: child,
+            chunks: splitText(text),
+            translatedChunks: []
+          });
+        }
+      }
+
+      if (!job.parts.some(part => part.chunks?.length)) return null;
+
+      pendingSet.add(target);
+      btn.disabled = true;
+      btn.textContent = BTN_TEXT_LOADING;
+      return job;
+    }
+
+    function getTencentBatchChunkItems(jobs) {
+      const items = [];
+
+      for (const job of jobs) {
+        for (const part of job.parts) {
+          if (!part.chunks) continue;
+
+          part.chunks.forEach((text, chunkIndex) => {
+            const cached = getCachedTranslation('tencentAi', text);
+            if (cached) {
+              part.translatedChunks[chunkIndex] = cached;
+              return;
+            }
+
+            items.push({ part, chunkIndex, text });
+          });
+        }
+      }
+
+      return items;
+    }
+
+    function createTencentBatchRequests(items) {
+      const batches = [];
+      let current = [];
+      let currentChars = 0;
+
+      for (const item of items) {
+        const nextChars = currentChars + item.text.length;
+        if (
+          current.length &&
+          (current.length >= TENCENT_BATCH_MAX_ITEMS || nextChars > TENCENT_BATCH_MAX_CHARS)
+        ) {
+          batches.push(current);
+          current = [];
+          currentChars = 0;
+        }
+
+        current.push(item);
+        currentChars += item.text.length;
+      }
+
+      if (current.length) batches.push(current);
+      return batches;
+    }
+
+    async function translateTencentBatchItems(items, session) {
+      const batches = createTencentBatchRequests(items);
+      let nextIndex = 0;
+      const workerCount = Math.min(TENCENT_BATCH_CONCURRENCY, batches.length);
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (!session?.stopped) {
+          const batch = batches[nextIndex];
+          nextIndex += 1;
+          if (!batch) break;
+
+          const translations = await retryTranslate(
+            () => translateBatchWithTencentAi(batch.map(item => item.text), session),
+            session,
+            1,
+            'tencentAi batch'
+          );
+          if (!translations) continue;
+
+          translations.forEach((translatedText, index) => {
+            const item = batch[index];
+            item.part.translatedChunks[item.chunkIndex] = translatedText;
+            setCachedTranslation('tencentAi', item.text, translatedText);
+          });
+        }
+      });
+
+      await Promise.all(workers);
+    }
+
+    function hasCompleteTencentBatchJob(job) {
+      return job.parts.every(part => (
+        !part.chunks ||
+        part.chunks.every((_, index) => part.translatedChunks[index])
+      ));
+    }
+
+    function releaseTencentBatchJob(job, text = BTN_TEXT_RETRY) {
+      pendingSet.delete(job.target);
+      job.btn.disabled = false;
+      job.btn.textContent = text;
+    }
+
+    function finishTencentBatchJob(job, session) {
+      const { target, btn } = job;
+
+      try {
+        if (session?.stopped) {
+          btn.textContent = BTN_TEXT_TRANSLATE;
+          return false;
+        }
+
+        if (!hasCompleteTencentBatchJob(job)) {
+          btn.textContent = BTN_TEXT_RETRY;
+          return false;
+        }
+
+        if (job.isTitle) {
+          const translatedText = job.parts[0].translatedChunks.join('');
+          stateMap.set(target, {
+            originalText: job.originalText,
+            translatedText,
+            showingTranslation: true
+          });
+          target.textContent = translatedText;
+          btn.textContent = BTN_TEXT_ORIGINAL;
+          return true;
+        }
+
+        for (const part of job.parts) {
+          if (part.clone) {
+            job.box.appendChild(part.clone);
+          } else {
+            job.box.appendChild(createTranslatedBlock(part.sourceNode, part.translatedChunks.join('')));
+          }
+        }
+
+        target.after(job.box);
+        stateMap.set(target, {
+          translationEl: job.box,
+          showingTranslation: true
+        });
+        target.hidden = true;
+        btn.textContent = BTN_TEXT_ORIGINAL;
+        return true;
+      } finally {
+        btn.disabled = false;
+        pendingSet.delete(target);
+      }
+    }
+
+    async function translateButtonsConcurrently(buttons, session) {
+      let nextIndex = 0;
+      const workerCount = Math.min(TRANSLATE_ALL_CONCURRENCY, buttons.length);
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (!session?.stopped) {
+          const btn = buttons[nextIndex];
+          nextIndex += 1;
+          if (!btn) break;
+
+          const target = buttonTargetMap.get(btn);
+          if (target && isPendingTranslateButton(btn)) {
+            try {
+              await ensureTranslation(target, btn, session);
+            } catch (error) {
+              logTranslateDebug('translate all item failed', error);
+            }
+          }
+        }
+      });
+
+      await Promise.all(workers);
+    }
+
+    async function translateAllWithTencentBatch(session, buttons, options = {}) {
+      const jobs = buttons
+        .map((btn) => {
+          const target = buttonTargetMap.get(btn);
+          return target && isPendingTranslateButton(btn) ? createTencentBatchJob(target, btn) : null;
+        })
+        .filter(Boolean);
+
+      const items = getTencentBatchChunkItems(jobs);
+      await translateTencentBatchItems(items, session);
+      const fallbackButtons = [];
+
+      for (const job of jobs) {
+        if (finishTencentBatchJob(job, session)) continue;
+        if (!options.fallbackOnFailure || session?.stopped) continue;
+
+        releaseTencentBatchJob(job);
+        fallbackButtons.push(job.btn);
+      }
+
+      if (fallbackButtons.length) {
+        await translateButtonsConcurrently(fallbackButtons, session);
+      }
+    }
+
     async function translateAll(session) {
       scan();
 
       const buttons = Array.from(document.querySelectorAll('.reddit-zh-translator-btn'))
         .filter(isPendingTranslateButton);
 
-      for (const btn of buttons) {
-        if (session?.stopped) break;
-
-        const target = buttonTargetMap.get(btn);
-        if (target && isPendingTranslateButton(btn)) {
-          await ensureTranslation(target, btn, session);
-        }
+      if (selectedTranslateApi === 'tencentAi' || selectedTranslateApi === TRANSLATE_API_AUTO) {
+        await translateAllWithTencentBatch(session, buttons, {
+          fallbackOnFailure: selectedTranslateApi === TRANSLATE_API_AUTO
+        });
+        return;
       }
+
+      await translateButtonsConcurrently(buttons, session);
     }
 
     function getInitialLoadSignature() {
@@ -1365,10 +1642,7 @@
         if (autoTranslateAllPath === location.pathname) return;
 
         const pathname = location.pathname;
-        const session = {
-          stopped: false,
-          abortCurrent: null
-        };
+        const session = createTranslateSession();
         autoTranslateAllPath = pathname;
         translateAllSession = session;
 
